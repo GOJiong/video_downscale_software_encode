@@ -120,7 +120,7 @@ jobs:
 
       # ── 4. Upload artifact ────────────────────────────────────────────────
       - name: Upload encoded video
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: output_720p_hevc
           path: output_720p.mp4
