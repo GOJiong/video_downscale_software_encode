@@ -29,8 +29,9 @@ jobs:
       - name: Download source video
         run: |
           pip install -q gdown
-          echo "Downloading from Google Drive..."
-          gdown --fuzzy -O source_video "${{ inputs.video_url }}"
+          FILE_ID=$(echo "${{ inputs.video_url }}" | sed 's|.*/d/\([^/]*\).*|\1|')
+          echo "Extracted file ID: $FILE_ID"
+          gdown -O source_video "$FILE_ID"
           echo "Download complete. File size: $(du -h source_video | cut -f1)"
 
       # ── 2. Probe + calculate target bitrate ───────────────────────────────
