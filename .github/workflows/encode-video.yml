@@ -1,53 +1,67 @@
-name: Encode Video — 1080p VP9 → 720p HEVC
+name: Batch Encode Videos — 1080p → 720p HEVC
 
 on:
   workflow_dispatch:
     inputs:
-      video_url:
-        description: "Direct download URL of the 1080p video (OneDrive: append &download=1)"
-        required: true
-        type: string
       size_ratio:
-        description: "Target size ratio vs original (0.50 = 50% smaller)"
+        description: "Target size ratio vs original (0.50 = 50% of source)"
         required: false
         default: "0.50"
-        type: string
       audio_kbps:
         description: "AAC audio bitrate in kbps"
         required: false
         default: "128"
-        type: string
+      retention_days:
+        description: "Artifact retention in days (1–90)"
+        required: false
+        default: "7"
 
 jobs:
-  encode:
+
+  # ── Job 1: read video_urls.json and feed it to the matrix ─────────────────
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # 6-hour ceiling; adjust if your video is very long
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read URL list
+        id: read
+        run: |
+          echo "matrix=$(cat .github/workflows/video_urls.json)" >> $GITHUB_OUTPUT
+
+  # ── Job 2: one runner per URL, all run in parallel ────────────────────────
+  encode:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false   # one failure won't cancel the other videos
+      matrix:
+        video_url: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
 
-      # ── 1. Download source video ───────────────────────────────────────────
-      - name: Download source video
-        run: |
-          pip install -q gdown
-          FILE_ID=$(echo "${{ inputs.video_url }}" | sed 's|.*/d/\([^/]*\).*|\1|')
-          echo "Extracted file ID: $FILE_ID"
-          gdown -O source_video "$FILE_ID"
-          echo "Download complete. File size: $(du -h source_video | cut -f1)"
-
-      # ── 1.1 Download ffmpeg  ───────────────────────────────────────────
       - name: Install ffmpeg
         run: sudo apt-get install -y ffmpeg
 
-      # ── 2. Probe + calculate target bitrate ───────────────────────────────
+      - name: Download source video
+        run: |
+          pip install -q gdown
+          FILE_ID=$(echo "${{ matrix.video_url }}" | sed 's|.*/d/\([^/]*\).*|\1|')
+          echo "File ID: $FILE_ID"
+          echo "FILE_ID=$FILE_ID" >> $GITHUB_ENV
+          gdown -O source_video "$FILE_ID"
+          echo "Download complete. Size: $(du -h source_video | cut -f1)"
+
       - name: Probe source and calculate bitrate budget
         run: |
-          echo "--- ffprobe output ---"
           ffprobe -v quiet \
                   -print_format json \
                   -show_format -show_streams \
                   source_video | tee probe.json
 
-          # Pull values with python3 (always available on ubuntu-latest)
           python3 - <<'EOF'
           import json, os
 
@@ -83,7 +97,6 @@ jobs:
           if video_kbps < 500:
               print(f"\n  WARNING: video bitrate {video_kbps} kbps is low for 720p!")
 
-          # Write to GITHUB_ENV so next steps can read them
           with open(os.environ["GITHUB_ENV"], "a") as env:
               env.write(f"VIDEO_KBPS={video_kbps}\n")
               env.write(f"AUDIO_KBPS={audio_kbps}\n")
@@ -92,10 +105,8 @@ jobs:
           INPUT_RATIO: ${{ inputs.size_ratio }}
           INPUT_AUDIO: ${{ inputs.audio_kbps }}
 
-      # ── 3. Encode ──────────────────────────────────────────────────────────
       - name: Encode to 720p HEVC (x265 slow, AAC)
         run: |
-          echo "Starting encode — video: ${VIDEO_KBPS} kbps, audio: ${AUDIO_KBPS} kbps"
           ffmpeg -y \
             -i source_video \
             -vf "scale=-2:720" \
@@ -118,11 +129,11 @@ jobs:
           print(f'  Reduction: {(1 - out/src)*100:.1f}%')
           "
 
-      # ── 4. Upload artifact ────────────────────────────────────────────────
+      # Artifact name includes the GDrive file ID so each video is distinct
       - name: Upload encoded video
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: output_720p_hevc
+          name: output_720p_${{ env.FILE_ID }}
           path: output_720p.mp4
-          retention-days: 90
+          retention-days: ${{ inputs.retention_days }}
           if-no-files-found: error
