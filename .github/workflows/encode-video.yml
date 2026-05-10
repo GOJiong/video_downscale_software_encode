@@ -34,6 +34,10 @@ jobs:
           gdown -O source_video "$FILE_ID"
           echo "Download complete. File size: $(du -h source_video | cut -f1)"
 
+      # ── 1.1 Download ffmpeg  ───────────────────────────────────────────
+      - name: Install ffmpeg
+        run: sudo apt-get install -y ffmpeg
+
       # ── 2. Probe + calculate target bitrate ───────────────────────────────
       - name: Probe source and calculate bitrate budget
         run: |
