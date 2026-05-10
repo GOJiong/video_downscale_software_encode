@@ -16,6 +16,9 @@ on:
         required: false
         default: "7"
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # silence Node 20 deprecation warnings
+
 jobs:
 
   # ── Job 1: read video_urls.json and feed it to the matrix ─────────────────
@@ -29,7 +32,8 @@ jobs:
       - name: Read URL list
         id: read
         run: |
-          echo "matrix=$(cat .github/workflows/video_urls.json)" >> $GITHUB_OUTPUT
+          # jq -c compacts the JSON to a single line — required for GITHUB_OUTPUT
+          echo "matrix=$(jq -c . .github/workflows/video_urls.json)" >> $GITHUB_OUTPUT
 
   # ── Job 2: one runner per URL, all run in parallel ────────────────────────
   encode:
