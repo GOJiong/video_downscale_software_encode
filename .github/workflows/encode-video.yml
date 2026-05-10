@@ -28,10 +28,9 @@ jobs:
       # ── 1. Download source video ───────────────────────────────────────────
       - name: Download source video
         run: |
-          echo "Downloading from: ${{ inputs.video_url }}"
-          curl -L --retry 3 --retry-delay 5 \
-               -o source_video \
-               "${{ inputs.video_url }}"
+          pip install -q gdown
+          echo "Downloading from Google Drive..."
+          gdown --fuzzy -O source_video "${{ inputs.video_url }}"
           echo "Download complete. File size: $(du -h source_video | cut -f1)"
 
       # ── 2. Probe + calculate target bitrate ───────────────────────────────
