@@ -111,6 +111,8 @@ jobs:
 
       - name: Encode to 720p HEVC (x265 slower 2-pass, AAC)
         run: |
+          STATS="x265_2pass.log"
+
           echo "Pass 1/2 — analysis..."
           ffmpeg -y \
             -i source_video \
@@ -118,9 +120,8 @@ jobs:
             -c:v libx265 \
             -preset slower \
             -b:v "${VIDEO_KBPS}k" \
-            -x265-params pass=1 \
-            -an \
-            -f null /dev/null
+            -x265-params "pass=1:stats=${STATS}:log-level=error" \
+            -an -f null /dev/null
 
           echo "Pass 2/2 — encoding..."
           ffmpeg -y \
@@ -129,8 +130,10 @@ jobs:
             -c:v libx265 \
             -preset slower \
             -b:v "${VIDEO_KBPS}k" \
-            -x265-params pass=2 \
+            -x265-params "pass=2:stats=${STATS}:log-level=error:aq-mode=3:psy-rdoq=1.0:deblock=-1:-1:limit-sao=1" \
             -tag:v hvc1 \
+            -pix_fmt yuv420p \
+            -map 0:v:0 -map 0:a? \
             -c:a aac \
             -b:a "${AUDIO_KBPS}k" \
             output_720p.mp4
