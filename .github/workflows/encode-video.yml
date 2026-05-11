@@ -1,38 +1,37 @@
-name: Batch Encode Videos — 1080p → 720p HEVC
+name: Ultra-Compact AV1 Phone Encode (720p)
 
 on:
   workflow_dispatch:
     inputs:
       size_ratio:
-        description: "Target size ratio vs original (0.50 = 50% of source)"
+        description: "Target output size ratio vs source (0.18-0.35 recommended)"
         required: false
-        default: "0.50"
+        default: "0.28"
+
       audio_kbps:
-        description: "AAC audio bitrate in kbps"
+        description: "Opus audio bitrate"
         required: false
-        default: "128"
+        default: "96"
+
+      preset:
+        description: "SVT-AV1 preset (4 recommended)"
+        required: false
+        default: "4"
+
       retention_days:
-        description: "Artifact retention in days (1–90)"
+        description: "Artifact retention days"
         required: false
         default: "7"
-      crf_threshold:
-        description: "Frame count above which CRF+VBV is used instead of 2-pass (default 30000)"
-        required: false
-        default: "30000"
-      crf_value:
-        description: "CRF quality value for the fallback path (lower = better, 18–28 typical)"
-        required: false
-        default: "22"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-
   prepare:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.read.outputs.matrix }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -45,170 +44,142 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 360
+
     strategy:
       fail-fast: false
       matrix:
         video_url: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
-
       - name: Install ffmpeg
-        run: sudo apt-get install -y ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3
 
       - name: Download source video
         run: |
           pip install -q gdown
-          FILE_ID=$(echo "${{ matrix.video_url }}" | sed 's|.*/d/\([^/]*\).*|\1|')
-          echo "File ID: $FILE_ID"
-          echo "FILE_ID=$FILE_ID" >> $GITHUB_ENV
-          gdown -O source_video "$FILE_ID"
-          echo "Download complete. Size: $(du -h source_video | cut -f1)"
 
-      - name: Probe source and calculate bitrate budget
+          FILE_ID=$(echo "${{ matrix.video_url }}" | sed 's|.*/d/\([^/]*\).*|\1|')
+
+          echo "FILE_ID=$FILE_ID" >> $GITHUB_ENV
+
+          gdown -O source_video "$FILE_ID"
+
+          echo "Downloaded:"
+          du -h source_video
+
+      - name: Probe source + calculate bitrate budget
         run: |
           ffprobe -v quiet \
                   -print_format json \
-                  -show_format -show_streams \
-                  source_video | tee probe.json
+                  -show_format \
+                  -show_streams \
+                  source_video > probe.json
 
-          python3 - <<'EOF'
-          import json, os, fractions
+          python3 << 'EOF'
+          import json
+          import os
 
           with open("probe.json") as f:
               data = json.load(f)
 
-          fmt        = data["format"]
+          fmt = data["format"]
+
           size_bytes = int(fmt["size"])
           duration_s = float(fmt["duration"])
-          total_kbps = int(fmt.get("bit_rate", 0)) // 1000
-          size_mb    = size_bytes / (1024 ** 2)
 
-          ratio      = float(os.environ.get("INPUT_RATIO", "0.50"))
-          audio_kbps = int(os.environ.get("INPUT_AUDIO", "128"))
-          threshold  = int(os.environ.get("INPUT_THRESHOLD", "30000"))
-          crf_value  = int(os.environ.get("INPUT_CRF", "22"))
+          ratio = float(os.environ.get("INPUT_RATIO", "0.28"))
+          audio_kbps = int(os.environ.get("INPUT_AUDIO", "64"))
 
-          # ── Frame count from duration × FPS (fast, no frame scan) ──────────
-          # Prefer the video stream's r_frame_rate; fall back to avg_frame_rate
-          fps_raw = None
-          for stream in data.get("streams", []):
-              if stream.get("codec_type") == "video":
-                  fps_raw = stream.get("r_frame_rate") or stream.get("avg_frame_rate")
-                  break
+          target_bytes = size_bytes * ratio
 
-          if fps_raw and "/" in fps_raw:
-              num, den = fps_raw.split("/")
-              fps = float(num) / float(den) if float(den) else 0.0
+          total_kbps = (target_bytes * 8) / (duration_s * 1000)
+
+          video_kbps = int(total_kbps - audio_kbps)
+
+          # Safety floor for 720p stylized content
+          video_kbps = max(video_kbps, 300)
+
+          # Small VBV helps prevent bitrate spikes
+          vbv_bufsize = int(video_kbps * 2) 
+
+          # Dynamic CRF estimation
+          if video_kbps < 300:
+              crf = 38
+          elif video_kbps < 450:
+              crf = 35
+          elif video_kbps < 700:
+              crf = 33
+          elif video_kbps < 1000:
+              crf = 31
           else:
-              fps = float(fps_raw) if fps_raw else 0.0
+              crf = 29
 
-          frame_count = int(duration_s * fps) if fps > 0 else 0
-          use_crf     = frame_count > threshold
+          size_mb = size_bytes / (1024**2)
 
-          # ── Bitrate budget (same as before) ─────────────────────────────────
-          target_bytes   = size_bytes * ratio
-          target_total_k = (target_bytes * 8) / (duration_s * 1000)
-          video_kbps     = max(int(target_total_k - audio_kbps), 100)
-          vbv_bufsize    = video_kbps * 2          # standard 2× buffer
-
-          h = int(duration_s // 3600)
-          m = int((duration_s % 3600) // 60)
-          s = int(duration_s % 60)
-          dur_fmt = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-          print(f"\n=== Budget summary ===")
-          print(f"  Duration       : {dur_fmt}")
-          print(f"  FPS            : {fps:.3f}")
-          print(f"  Frame count    : {frame_count:,}  (threshold: {threshold:,})")
-          print(f"  Encode method  : {'CRF+VBV (fallback)' if use_crf else '2-pass VBR'}")
-          print(f"  Source size    : {size_mb:.1f} MB")
-          print(f"  Source kbps    : {total_kbps:,}")
-          print(f"  Target size    : ~{size_mb * ratio:.1f} MB  ({int(ratio*100)}% of source)")
-          print(f"  Video budget   : {video_kbps:,} kbps  (VBV buf: {vbv_bufsize:,} kbps)")
-          if use_crf:
-              print(f"  CRF value      : {crf_value}")
-          print(f"  Audio budget   : {audio_kbps} kbps AAC")
-
-          if video_kbps < 500:
-              print(f"\n  WARNING: video bitrate {video_kbps} kbps is low for 720p!")
+          print()
+          print("=== Compression Budget ===")
+          print(f"Source size     : {size_mb:.1f} MB")
+          print(f"Target ratio    : {ratio:.2f}")
+          print(f"Target size     : {size_mb * ratio:.1f} MB")
+          print(f"Video bitrate   : {video_kbps} kbps")
+          print(f"Audio bitrate   : {audio_kbps} kbps")
+          print(f"VBV bufsize     : {vbv_bufsize} kbps")
+          print(f"Dynamic CRF     : {crf}")
 
           with open(os.environ["GITHUB_ENV"], "a") as env:
               env.write(f"VIDEO_KBPS={video_kbps}\n")
               env.write(f"AUDIO_KBPS={audio_kbps}\n")
               env.write(f"VBV_BUFSIZE={vbv_bufsize}\n")
-              env.write(f"FRAME_COUNT={frame_count}\n")
-              env.write(f"USE_CRF={'true' if use_crf else 'false'}\n")
-              env.write(f"CRF_VALUE={crf_value}\n")
+              env.write(f"DYNAMIC_CRF={crf}\n")
           EOF
         env:
-          INPUT_RATIO:     ${{ inputs.size_ratio }}
-          INPUT_AUDIO:     ${{ inputs.audio_kbps }}
-          INPUT_THRESHOLD: ${{ inputs.crf_threshold }}
-          INPUT_CRF:       ${{ inputs.crf_value }}
+          INPUT_RATIO: ${{ inputs.size_ratio }}
+          INPUT_AUDIO: ${{ inputs.audio_kbps }}
 
-      - name: Encode to 720p HEVC (x265 slower, auto method)
+      - name: Encode AV1
         run: |
-          COMMON_X265="aq-mode=3:psy-rdoq=1.0:deblock=-1:-1:limit-sao=1:log-level=error"
-          COMMON_OUT=(-tag:v hvc1 -pix_fmt yuv420p
-                      -map 0:v:0 -map "0:a?"
-                      -c:a aac -b:a "${AUDIO_KBPS}k"
-                      output_720p.mp4)
+          echo "Encoding..."
 
-          if [ "$USE_CRF" = "true" ]; then
-            echo ">>> Frame count ${FRAME_COUNT} exceeds threshold — using CRF+VBV (single-pass)"
-            echo "    CRF=${CRF_VALUE}  maxrate=${VIDEO_KBPS}k  bufsize=${VBV_BUFSIZE}k"
-            ffmpeg -y \
-              -i source_video \
-              -vf "scale=-2:720" \
-              -c:v libx265 \
-              -preset slower \
-              -crf "${CRF_VALUE}" \
-              -maxrate "${VIDEO_KBPS}k" \
-              -bufsize "${VBV_BUFSIZE}k" \
-              -x265-params "${COMMON_X265}" \
-              "${COMMON_OUT[@]}"
-          else
-            echo ">>> Frame count ${FRAME_COUNT} within threshold — using 2-pass VBR"
-            STATS="x265_2pass.log"
+          ffmpeg -y \
+            -i source_video \
+            -map 0:v:0 \
+            -map "0:a?" \
+            -vf "scale=-2:720:flags=lanczos" \
+            -pix_fmt yuv420p10le \
+            -c:v libsvtav1 \
+            -preset "${{ inputs.preset }}" \
+            -crf "${DYNAMIC_CRF}" \
+            -maxrate "${VIDEO_KBPS}k" \
+            -bufsize "${VBV_BUFSIZE}k" \
+            -svtav1-params \
+            tune=0:enable-qm=1:keyint=120:lookahead=60 \
+            -c:a libopus \
+            -b:a "${AUDIO_KBPS}k" \
+            output_720p_av1.webm
 
-            echo "Pass 1/2 — analysis..."
-            ffmpeg -y \
-              -i source_video \
-              -vf "scale=-2:720" \
-              -c:v libx265 \
-              -preset slower \
-              -b:v "${VIDEO_KBPS}k" \
-              -x265-params "pass=1:stats=${STATS}:${COMMON_X265}" \
-              -an -f null /dev/null
-
-            echo "Pass 2/2 — encoding..."
-            ffmpeg -y \
-              -i source_video \
-              -vf "scale=-2:720" \
-              -c:v libx265 \
-              -preset slower \
-              -b:v "${VIDEO_KBPS}k" \
-              -x265-params "pass=2:stats=${STATS}:${COMMON_X265}" \
-              "${COMMON_OUT[@]}"
-          fi
-
+      - name: Show results
+        run: |
           echo ""
-          echo "=== Result ==="
-          SRC_SIZE=$(stat -c%s source_video)
-          OUT_SIZE=$(stat -c%s output_720p.mp4)
-          python3 -c "
-          src=$SRC_SIZE; out=$OUT_SIZE
-          method='CRF+VBV' if '${USE_CRF}' == 'true' else '2-pass VBR'
-          print(f'  Method   : {method}')
-          print(f'  Source   : {src/1024**2:.1f} MB')
-          print(f'  Output   : {out/1024**2:.1f} MB')
-          print(f'  Reduction: {(1 - out/src)*100:.1f}%')
-          "
+          echo "=== Final Result ==="
+
+          SRC=$(stat -c%s source_video)
+          OUT=$(stat -c%s output_720p_av1.webm)
+
+          python3 - << EOF
+          src = $SRC
+          out = $OUT
+
+          print(f"Source : {src/1024**2:.2f} MB")
+          print(f"Output : {out/1024**2:.2f} MB")
+          print(f"Saved  : {(1 - out/src)*100:.1f}%")
+          EOF
 
       - name: Upload encoded video
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v4
+
         with:
-          name: output_720p_${{ env.FILE_ID }}
-          path: output_720p.mp4
+          name: av1_720p_${{ env.FILE_ID }}
+          path: output_720p_av1.webm
           retention-days: ${{ inputs.retention_days }}
-          if-no-files-found: error
