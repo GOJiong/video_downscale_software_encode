@@ -3,18 +3,14 @@ name: Batch Encode Videos — 1080p → 720p AV1
 on:
   workflow_dispatch:
     inputs:
-      video_kbps:
-        description: "Video bitrate in kbps (1100–1400 recommended)"
+      crf_value:
+        description: "CRF quality level (34–40 recommended; 36 default)"
         required: false
-        default: "1350"
+        default: "36"
       audio_kbps:
         description: "Opus audio bitrate in kbps (96 recommended for game audio)"
         required: false
         default: "96"
-      frame_threshold:
-        description: "Frame count above which preset switches 4→6 to stay within 6h limit"
-        required: false
-        default: "40000"
       retention_days:
         description: "Artifact retention days (1–90)"
         required: false
@@ -60,7 +56,7 @@ jobs:
           gdown -O source_video "$FILE_ID"
           echo "Downloaded: $(du -h source_video | cut -f1)"
 
-      - name: Probe source and select preset
+      - name: Probe source
         run: |
           ffprobe -v quiet \
                   -print_format json \
@@ -75,9 +71,6 @@ jobs:
 
           fmt        = data["format"]
           duration_s = float(fmt["duration"])
-          threshold  = int(os.environ.get("INPUT_THRESHOLD", "40000"))
-          video_kbps = int(os.environ.get("INPUT_VIDEO_KBPS", "1350"))
-          audio_kbps = int(os.environ.get("INPUT_AUDIO_KBPS", "96"))
 
           fps_raw = None
           for stream in data.get("streams", []):
@@ -92,7 +85,6 @@ jobs:
               fps = float(fps_raw) if fps_raw else 0.0
 
           frame_count = int(duration_s * fps) if fps > 0 else 0
-          preset = 6 if frame_count > threshold else 4
 
           h = int(duration_s // 3600)
           m = int((duration_s % 3600) // 60)
@@ -100,56 +92,35 @@ jobs:
           dur_fmt = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
           print(f"\n=== Encode Plan ===")
-          print(f"  Duration       : {dur_fmt}")
-          print(f"  FPS            : {fps:.3f}")
-          print(f"  Frame count    : {frame_count:,}  (threshold: {threshold:,})")
-          print(f"  Preset         : {preset}  ({'thorough' if preset == 4 else 'faster — long video'})")
-          print(f"  Video bitrate  : {video_kbps:,} kbps (fixed)")
-          print(f"  Audio bitrate  : {audio_kbps} kbps Opus")
-          print(f"  Encode method  : 2-pass VBR (always)")
-
-          with open(os.environ["GITHUB_ENV"], "a") as env:
-              env.write(f"VIDEO_KBPS={video_kbps}\n")
-              env.write(f"AUDIO_KBPS={audio_kbps}\n")
-              env.write(f"FRAME_COUNT={frame_count}\n")
-              env.write(f"PRESET={preset}\n")
+          print(f"  Duration      : {dur_fmt}")
+          print(f"  FPS           : {fps:.3f}")
+          print(f"  Frame count   : {frame_count:,}")
+          print(f"  Preset        : 4 (fixed)")
+          print(f"  CRF           : {os.environ.get('INPUT_CRF', '36')}")
+          print(f"  Audio         : {os.environ.get('INPUT_AUDIO_KBPS', '96')} kbps Opus")
+          print(f"  Encode method : CRF single-pass")
           EOF
         env:
-          INPUT_THRESHOLD:  ${{ inputs.frame_threshold }}
-          INPUT_VIDEO_KBPS: ${{ inputs.video_kbps }}
+          INPUT_CRF:        ${{ inputs.crf_value }}
           INPUT_AUDIO_KBPS: ${{ inputs.audio_kbps }}
 
-      - name: Encode to 720p AV1 — 2-pass VBR
+      - name: Encode to 720p AV1 — CRF
         run: |
           SVT_PARAMS="tune=0:enable-qm=1:keyint=120:lookahead=60"
 
-          echo ">>> 2-pass VBR | preset ${PRESET} | ${VIDEO_KBPS}k target | ${FRAME_COUNT} frames"
+          echo ">>> CRF ${{ inputs.crf_value }} | preset 4 | single-pass"
 
-          echo "Pass 1/2 — analysis..."
           ffmpeg -y \
             -i source_video \
             -vf "scale=-2:720:flags=lanczos" \
             -pix_fmt yuv420p10le \
             -c:v libsvtav1 \
-            -preset "${PRESET}" \
-            -b:v "${VIDEO_KBPS}k" \
+            -preset 4 \
+            -crf "${{ inputs.crf_value }}" \
             -svtav1-params "${SVT_PARAMS}" \
-            -pass 1 \
-            -an -f null /dev/null
-
-          echo "Pass 2/2 — encoding..."
-          ffmpeg -y \
-            -i source_video \
-            -vf "scale=-2:720:flags=lanczos" \
-            -pix_fmt yuv420p10le \
-            -c:v libsvtav1 \
-            -preset "${PRESET}" \
-            -b:v "${VIDEO_KBPS}k" \
-            -svtav1-params "${SVT_PARAMS}" \
-            -pass 2 \
             -map 0:v:0 -map "0:a?" \
             -c:a libopus \
-            -b:a "${AUDIO_KBPS}k" \
+            -b:a "${{ inputs.audio_kbps }}k" \
             output_720p_av1.webm
 
           echo ""
@@ -158,10 +129,9 @@ jobs:
           OUT=$(stat -c%s output_720p_av1.webm)
           python3 -c "
           src=$SRC; out=$OUT
-          print(f'  Preset   : ${PRESET}')
-          print(f'  Source   : {src/1024**2:.1f} MB')
-          print(f'  Output   : {out/1024**2:.1f} MB')
-          print(f'  Saved    : {(1 - out/src)*100:.1f}%')
+          print(f'  Source : {src/1024**2:.1f} MB')
+          print(f'  Output : {out/1024**2:.1f} MB')
+          print(f'  Saved  : {(1 - out/src)*100:.1f}%')
           "
 
       - name: Upload encoded video
