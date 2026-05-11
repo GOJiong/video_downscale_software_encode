@@ -105,7 +105,6 @@ jobs:
           target_bytes   = size_bytes * ratio
           target_total_k = (target_bytes * 8) / (duration_s * 1000)
           video_kbps     = max(int(target_total_k - audio_kbps), 300)  # 300k floor for 720p
-          vbv_bufsize    = video_kbps * 2   # 2× is standard; gives encoder room to breathe
 
           h = int(duration_s // 3600)
           m = int((duration_s % 3600) // 60)
@@ -121,7 +120,6 @@ jobs:
           print(f"  Source kbps    : {total_kbps:,}")
           print(f"  Target size    : ~{size_mb * ratio:.1f} MB  ({int(ratio*100)}% of source)")
           print(f"  Video bitrate  : {video_kbps:,} kbps")
-          print(f"  VBV bufsize    : {vbv_bufsize:,} kbps  (2× video bitrate)")
           print(f"  Audio bitrate  : {audio_kbps} kbps Opus")
           print(f"  Encode method  : 2-pass VBR (always)")
 
@@ -131,7 +129,6 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a") as env:
               env.write(f"VIDEO_KBPS={video_kbps}\n")
               env.write(f"AUDIO_KBPS={audio_kbps}\n")
-              env.write(f"VBV_BUFSIZE={vbv_bufsize}\n")
               env.write(f"FRAME_COUNT={frame_count}\n")
               env.write(f"PRESET={preset}\n")
           EOF
@@ -166,8 +163,6 @@ jobs:
             -c:v libsvtav1 \
             -preset "${PRESET}" \
             -b:v "${VIDEO_KBPS}k" \
-            -maxrate "${VIDEO_KBPS}k" \
-            -bufsize "${VBV_BUFSIZE}k" \
             -svtav1-params "${SVT_PARAMS}" \
             -pass 2 \
             -map 0:v:0 -map "0:a?" \
