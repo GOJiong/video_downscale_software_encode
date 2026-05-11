@@ -1,25 +1,22 @@
-name: Ultra-Compact AV1 Phone Encode (720p)
+name: Batch Encode Videos — 1080p → 720p AV1
 
 on:
   workflow_dispatch:
     inputs:
       size_ratio:
-        description: "Target output size ratio vs source (0.18-0.35 recommended)"
+        description: "Target output size ratio vs source (0.18–0.35 recommended)"
         required: false
         default: "0.28"
-
       audio_kbps:
-        description: "Opus audio bitrate"
+        description: "Opus audio bitrate in kbps (96 recommended for game audio)"
         required: false
         default: "96"
-
-      preset:
-        description: "SVT-AV1 preset (4 recommended)"
+      frame_threshold:
+        description: "Frame count above which preset switches 4→6 to stay within 6h limit"
         required: false
-        default: "4"
-
+        default: "30000"
       retention_days:
-        description: "Artifact retention days"
+        description: "Artifact retention days (1–90)"
         required: false
         default: "7"
 
@@ -27,14 +24,13 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+
   prepare:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.read.outputs.matrix }}
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Read URL list
         id: read
         run: |
@@ -44,13 +40,13 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 360
-
     strategy:
       fail-fast: false
       matrix:
         video_url: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
+
       - name: Install ffmpeg
         run: |
           sudo apt-get update
@@ -59,127 +55,142 @@ jobs:
       - name: Download source video
         run: |
           pip install -q gdown
-
           FILE_ID=$(echo "${{ matrix.video_url }}" | sed 's|.*/d/\([^/]*\).*|\1|')
-
           echo "FILE_ID=$FILE_ID" >> $GITHUB_ENV
-
           gdown -O source_video "$FILE_ID"
+          echo "Downloaded: $(du -h source_video | cut -f1)"
 
-          echo "Downloaded:"
-          du -h source_video
-
-      - name: Probe source + calculate bitrate budget
+      - name: Probe source and calculate bitrate budget
         run: |
           ffprobe -v quiet \
                   -print_format json \
-                  -show_format \
-                  -show_streams \
-                  source_video > probe.json
+                  -show_format -show_streams \
+                  source_video | tee probe.json
 
-          python3 << 'EOF'
-          import json
-          import os
+          python3 - <<'EOF'
+          import json, os
 
           with open("probe.json") as f:
               data = json.load(f)
 
-          fmt = data["format"]
-
+          fmt        = data["format"]
           size_bytes = int(fmt["size"])
           duration_s = float(fmt["duration"])
+          total_kbps = int(fmt.get("bit_rate", 0)) // 1000
+          size_mb    = size_bytes / (1024 ** 2)
 
-          ratio = float(os.environ.get("INPUT_RATIO", "0.28"))
-          audio_kbps = int(os.environ.get("INPUT_AUDIO", "64"))
+          ratio      = float(os.environ.get("INPUT_RATIO", "0.28"))
+          audio_kbps = int(os.environ.get("INPUT_AUDIO", "96"))
+          threshold  = int(os.environ.get("INPUT_THRESHOLD", "30000"))
 
-          target_bytes = size_bytes * ratio
+          # ── Frame count ──────────────────────────────────────────────────────
+          fps_raw = None
+          for stream in data.get("streams", []):
+              if stream.get("codec_type") == "video":
+                  fps_raw = stream.get("r_frame_rate") or stream.get("avg_frame_rate")
+                  break
 
-          total_kbps = (target_bytes * 8) / (duration_s * 1000)
-
-          video_kbps = int(total_kbps - audio_kbps)
-
-          # Safety floor for 720p stylized content
-          video_kbps = max(video_kbps, 300)
-
-          # Small VBV helps prevent bitrate spikes
-          vbv_bufsize = int(video_kbps * 2) 
-
-          # Dynamic CRF estimation
-          if video_kbps < 300:
-              crf = 38
-          elif video_kbps < 450:
-              crf = 35
-          elif video_kbps < 700:
-              crf = 33
-          elif video_kbps < 1000:
-              crf = 31
+          if fps_raw and "/" in fps_raw:
+              num, den = fps_raw.split("/")
+              fps = float(num) / float(den) if float(den) else 0.0
           else:
-              crf = 29
+              fps = float(fps_raw) if fps_raw else 0.0
 
-          size_mb = size_bytes / (1024**2)
+          frame_count = int(duration_s * fps) if fps > 0 else 0
 
-          print()
-          print("=== Compression Budget ===")
-          print(f"Source size     : {size_mb:.1f} MB")
-          print(f"Target ratio    : {ratio:.2f}")
-          print(f"Target size     : {size_mb * ratio:.1f} MB")
-          print(f"Video bitrate   : {video_kbps} kbps")
-          print(f"Audio bitrate   : {audio_kbps} kbps")
-          print(f"VBV bufsize     : {vbv_bufsize} kbps")
-          print(f"Dynamic CRF     : {crf}")
+          # preset 4 = thorough (short videos), preset 6 = faster (long videos)
+          preset = 6 if frame_count > threshold else 4
+
+          # ── Bitrate budget ───────────────────────────────────────────────────
+          target_bytes   = size_bytes * ratio
+          target_total_k = (target_bytes * 8) / (duration_s * 1000)
+          video_kbps     = max(int(target_total_k - audio_kbps), 300)  # 300k floor for 720p
+          vbv_bufsize    = video_kbps * 2   # 2× is standard; gives encoder room to breathe
+
+          h = int(duration_s // 3600)
+          m = int((duration_s % 3600) // 60)
+          s = int(duration_s % 60)
+          dur_fmt = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+          print(f"\n=== Encode Plan ===")
+          print(f"  Duration       : {dur_fmt}")
+          print(f"  FPS            : {fps:.3f}")
+          print(f"  Frame count    : {frame_count:,}  (threshold: {threshold:,})")
+          print(f"  Preset         : {preset}  ({'thorough' if preset == 4 else 'faster — long video'})")
+          print(f"  Source size    : {size_mb:.1f} MB")
+          print(f"  Source kbps    : {total_kbps:,}")
+          print(f"  Target size    : ~{size_mb * ratio:.1f} MB  ({int(ratio*100)}% of source)")
+          print(f"  Video bitrate  : {video_kbps:,} kbps")
+          print(f"  VBV bufsize    : {vbv_bufsize:,} kbps  (2× video bitrate)")
+          print(f"  Audio bitrate  : {audio_kbps} kbps Opus")
+          print(f"  Encode method  : 2-pass VBR (always)")
+
+          if video_kbps == 300:
+              print(f"\n  NOTE: bitrate floor applied (calculated value was below 300 kbps)")
 
           with open(os.environ["GITHUB_ENV"], "a") as env:
               env.write(f"VIDEO_KBPS={video_kbps}\n")
               env.write(f"AUDIO_KBPS={audio_kbps}\n")
               env.write(f"VBV_BUFSIZE={vbv_bufsize}\n")
-              env.write(f"DYNAMIC_CRF={crf}\n")
+              env.write(f"FRAME_COUNT={frame_count}\n")
+              env.write(f"PRESET={preset}\n")
           EOF
         env:
-          INPUT_RATIO: ${{ inputs.size_ratio }}
-          INPUT_AUDIO: ${{ inputs.audio_kbps }}
+          INPUT_RATIO:     ${{ inputs.size_ratio }}
+          INPUT_AUDIO:     ${{ inputs.audio_kbps }}
+          INPUT_THRESHOLD: ${{ inputs.frame_threshold }}
 
-      - name: Encode AV1
+      - name: Encode to 720p AV1 — 2-pass VBR
         run: |
-          echo "Encoding..."
+          SVT_PARAMS="tune=0:enable-qm=1:keyint=120:lookahead=60"
 
+          echo ">>> 2-pass VBR | preset ${PRESET} | ${VIDEO_KBPS}k target | ${FRAME_COUNT} frames"
+
+          echo "Pass 1/2 — analysis..."
           ffmpeg -y \
             -i source_video \
-            -map 0:v:0 \
-            -map "0:a?" \
             -vf "scale=-2:720:flags=lanczos" \
             -pix_fmt yuv420p10le \
             -c:v libsvtav1 \
-            -preset "${{ inputs.preset }}" \
-            -crf "${DYNAMIC_CRF}" \
+            -preset "${PRESET}" \
+            -b:v "${VIDEO_KBPS}k" \
+            -svtav1-params "${SVT_PARAMS}" \
+            -pass 1 \
+            -an -f null /dev/null
+
+          echo "Pass 2/2 — encoding..."
+          ffmpeg -y \
+            -i source_video \
+            -vf "scale=-2:720:flags=lanczos" \
+            -pix_fmt yuv420p10le \
+            -c:v libsvtav1 \
+            -preset "${PRESET}" \
+            -b:v "${VIDEO_KBPS}k" \
             -maxrate "${VIDEO_KBPS}k" \
             -bufsize "${VBV_BUFSIZE}k" \
-            -svtav1-params \
-            tune=0:enable-qm=1:keyint=120:lookahead=60 \
+            -svtav1-params "${SVT_PARAMS}" \
+            -pass 2 \
+            -map 0:v:0 -map "0:a?" \
             -c:a libopus \
             -b:a "${AUDIO_KBPS}k" \
             output_720p_av1.webm
 
-      - name: Show results
-        run: |
           echo ""
-          echo "=== Final Result ==="
-
+          echo "=== Result ==="
           SRC=$(stat -c%s source_video)
           OUT=$(stat -c%s output_720p_av1.webm)
-
-          python3 - << EOF
-          src = $SRC
-          out = $OUT
-
-          print(f"Source : {src/1024**2:.2f} MB")
-          print(f"Output : {out/1024**2:.2f} MB")
-          print(f"Saved  : {(1 - out/src)*100:.1f}%")
-          EOF
+          python3 -c "
+          src=$SRC; out=$OUT
+          print(f'  Preset   : ${PRESET}')
+          print(f'  Source   : {src/1024**2:.1f} MB')
+          print(f'  Output   : {out/1024**2:.1f} MB')
+          print(f'  Saved    : {(1 - out/src)*100:.1f}%')
+          "
 
       - name: Upload encoded video
         uses: actions/upload-artifact@v4
-
         with:
           name: av1_720p_${{ env.FILE_ID }}
           path: output_720p_av1.webm
           retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: error
