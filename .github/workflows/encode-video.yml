@@ -3,10 +3,10 @@ name: Batch Encode Videos — 1080p → 720p AV1
 on:
   workflow_dispatch:
     inputs:
-      size_ratio:
-        description: "Target output size ratio vs source (0.18–0.35 recommended)"
+      video_kbps:
+        description: "Video bitrate in kbps (1100–1400 recommended)"
         required: false
-        default: "0.35"
+        default: "1350"
       audio_kbps:
         description: "Opus audio bitrate in kbps (96 recommended for game audio)"
         required: false
@@ -14,7 +14,7 @@ on:
       frame_threshold:
         description: "Frame count above which preset switches 4→6 to stay within 6h limit"
         required: false
-        default: "36000"
+        default: "40000"
       retention_days:
         description: "Artifact retention days (1–90)"
         required: false
@@ -60,7 +60,7 @@ jobs:
           gdown -O source_video "$FILE_ID"
           echo "Downloaded: $(du -h source_video | cut -f1)"
 
-      - name: Probe source and calculate bitrate budget
+      - name: Probe source and select preset
         run: |
           ffprobe -v quiet \
                   -print_format json \
@@ -74,16 +74,11 @@ jobs:
               data = json.load(f)
 
           fmt        = data["format"]
-          size_bytes = int(fmt["size"])
           duration_s = float(fmt["duration"])
-          total_kbps = int(fmt.get("bit_rate", 0)) // 1000
-          size_mb    = size_bytes / (1024 ** 2)
+          threshold  = int(os.environ.get("INPUT_THRESHOLD", "40000"))
+          video_kbps = int(os.environ.get("INPUT_VIDEO_KBPS", "1350"))
+          audio_kbps = int(os.environ.get("INPUT_AUDIO_KBPS", "96"))
 
-          ratio      = float(os.environ.get("INPUT_RATIO", "0.28"))
-          audio_kbps = int(os.environ.get("INPUT_AUDIO", "96"))
-          threshold  = int(os.environ.get("INPUT_THRESHOLD", "30000"))
-
-          # ── Frame count ──────────────────────────────────────────────────────
           fps_raw = None
           for stream in data.get("streams", []):
               if stream.get("codec_type") == "video":
@@ -97,14 +92,7 @@ jobs:
               fps = float(fps_raw) if fps_raw else 0.0
 
           frame_count = int(duration_s * fps) if fps > 0 else 0
-
-          # preset 4 = thorough (short videos), preset 6 = faster (long videos)
           preset = 6 if frame_count > threshold else 4
-
-          # ── Bitrate budget ───────────────────────────────────────────────────
-          target_bytes   = size_bytes * ratio
-          target_total_k = (target_bytes * 8) / (duration_s * 1000)
-          video_kbps     = max(int(target_total_k - audio_kbps), 300)  # 300k floor for 720p
 
           h = int(duration_s // 3600)
           m = int((duration_s % 3600) // 60)
@@ -116,15 +104,9 @@ jobs:
           print(f"  FPS            : {fps:.3f}")
           print(f"  Frame count    : {frame_count:,}  (threshold: {threshold:,})")
           print(f"  Preset         : {preset}  ({'thorough' if preset == 4 else 'faster — long video'})")
-          print(f"  Source size    : {size_mb:.1f} MB")
-          print(f"  Source kbps    : {total_kbps:,}")
-          print(f"  Target size    : ~{size_mb * ratio:.1f} MB  ({int(ratio*100)}% of source)")
-          print(f"  Video bitrate  : {video_kbps:,} kbps")
+          print(f"  Video bitrate  : {video_kbps:,} kbps (fixed)")
           print(f"  Audio bitrate  : {audio_kbps} kbps Opus")
           print(f"  Encode method  : 2-pass VBR (always)")
-
-          if video_kbps == 300:
-              print(f"\n  NOTE: bitrate floor applied (calculated value was below 300 kbps)")
 
           with open(os.environ["GITHUB_ENV"], "a") as env:
               env.write(f"VIDEO_KBPS={video_kbps}\n")
@@ -133,9 +115,9 @@ jobs:
               env.write(f"PRESET={preset}\n")
           EOF
         env:
-          INPUT_RATIO:     ${{ inputs.size_ratio }}
-          INPUT_AUDIO:     ${{ inputs.audio_kbps }}
-          INPUT_THRESHOLD: ${{ inputs.frame_threshold }}
+          INPUT_THRESHOLD:  ${{ inputs.frame_threshold }}
+          INPUT_VIDEO_KBPS: ${{ inputs.video_kbps }}
+          INPUT_AUDIO_KBPS: ${{ inputs.audio_kbps }}
 
       - name: Encode to 720p AV1 — 2-pass VBR
         run: |
