@@ -6,7 +6,7 @@ on:
       size_ratio:
         description: "Target output size ratio vs source (0.18–0.35 recommended)"
         required: false
-        default: "0.28"
+        default: "0.35"
       audio_kbps:
         description: "Opus audio bitrate in kbps (96 recommended for game audio)"
         required: false
@@ -14,11 +14,11 @@ on:
       frame_threshold:
         description: "Frame count above which preset switches 4→6 to stay within 6h limit"
         required: false
-        default: "30000"
+        default: "36000"
       retention_days:
         description: "Artifact retention days (1–90)"
         required: false
-        default: "7"
+        default: "1"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
