@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       crf_value:
-        description: "CRF quality level (34–40 recommended; 36 default)"
+        description: "CRF quality level (34–40 recommended; 38 default)"
         required: false
-        default: "36"
+        default: "38"
       audio_kbps:
         description: "Opus audio bitrate in kbps (96 recommended for game audio)"
         required: false
