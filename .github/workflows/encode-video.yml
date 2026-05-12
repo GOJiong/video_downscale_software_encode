@@ -111,6 +111,7 @@ jobs:
           echo ">>> CRF ${{ inputs.crf_value }} | preset 4 | single-pass"
 
           ffmpeg -y \
+            -stats_period 10 \
             -i source_video \
             -vf "scale=-2:720:flags=lanczos" \
             -pix_fmt yuv420p10le \
